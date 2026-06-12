@@ -1,1 +1,9 @@
 CV.pdf
+arxiv-source/
+translation/
+arXiv-*.tar.gz
+*.log
+data/
+__pycache__/
+*.pyc
+.venv/
