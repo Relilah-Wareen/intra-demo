@@ -103,37 +103,29 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
             def _new_forward(
                 self,
                 hidden_states,
-                position_ids=None,
-                attention_mask=None,
+                position_embeddings=None,
+                merged_attention_mask=None,
                 encoder_hidden_states=None,
-                encoder_attention_mask=None,
-                past_key_value=None,
-                cache_position=None,
+                past_key_values=None,
                 **kwargs,
             ):
-                # ---- Step 1: Q projection + q_norm + RoPE (matching original) ----
+                # ---- Step 1: Q projection + q_norm + RoPE ----
                 bsz, q_len, _ = hidden_states.size()
                 hidden_shape = (bsz, q_len, nq, dh)
 
-                # Q projection
                 query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                # q_norm (RMSNorm on Q)
                 query_states = self.q_norm(query_states)
 
-                # RoPE — need position_ids
-                if position_ids is None:
-                    position_ids = torch.arange(q_len, device=hidden_states.device).unsqueeze(0)
-
-                cos, sin = self.rotary_emb(query_states, position_ids)
-                query_states, _ = _apply_rotary_pos_emb_single(query_states, cos, sin)
+                # Apply RoPE using position_embeddings from decoder layer
+                if position_embeddings is not None:
+                    cos, sin = position_embeddings
+                    query_states, _ = _apply_rotary_pos_emb_single(query_states, cos, sin)
 
                 # ---- Step 2: Compute q̃ (Reverse-QWK) ----
-                # q̃ = (q ⊙ γ_K) · W_K^T
-                W_k_weight = self.k_proj.weight  # [n_kv*d_h, d_model]
-                W_k_r = W_k_weight.view(nkv, dh, dm).repeat_interleave(nrep, dim=0)  # [n_q, d_h, d_model]
-                gamma_k = self.k_norm.weight  # [d_h]
+                W_k_weight = self.k_proj.weight
+                W_k_r = W_k_weight.view(nkv, dh, dm).repeat_interleave(nrep, dim=0)
+                gamma_k = self.k_norm.weight
                 q_tilde = torch.einsum('bqhd,hdi->bhqi', query_states * gamma_k, W_k_r)
-                # q_tilde: [B, n_q, q_len, d_model]
 
                 _registry[lidx]._last_q_tilde = q_tilde.detach()
 
@@ -141,12 +133,10 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
                 return _orig(
                     self,
                     hidden_states=hidden_states,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
+                    position_embeddings=position_embeddings,
+                    merged_attention_mask=merged_attention_mask,
                     encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    past_key_value=past_key_value,
-                    cache_position=cache_position,
+                    past_key_values=past_key_values,
                     **kwargs,
                 )
 
