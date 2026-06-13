@@ -41,10 +41,11 @@ class Config:
     n_final_chunks: int = 5
 
     # --- Training ---
-    lr: float = 3e-3
-    warmup_steps: int = 100
-    train_steps: int = 5000
-    train_batch_size: int = 2
+    lr: float = 5e-3
+    warmup_steps: int = 200
+    train_steps: int = 10000
+    train_batch_size: int = 8
+    pool_subset: int = 1000         # randomly sample N chunks per training step
 
     # --- Paths ---
     data_dir: Path = ROOT / "data"
