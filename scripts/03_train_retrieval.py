@@ -150,6 +150,8 @@ def main():
             loss = retrieval_loss_fn(scores, oracle_sub)
             batch_loss = batch_loss + loss
 
+        if not batch_loss.requires_grad:
+            continue  # no oracle chunks in this batch's subsets
         batch_loss = batch_loss / cfg.train_batch_size
         batch_loss.backward()
         torch.nn.utils.clip_grad_norm_(params.parameters(), 1.0)
