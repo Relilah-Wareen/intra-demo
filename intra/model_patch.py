@@ -12,6 +12,7 @@ Based on actual T5Gemma2-270M-270M and T5Gemma2-1B-1B structures:
 from __future__ import annotations
 
 import math
+import types
 from typing import Callable
 
 import torch
@@ -151,7 +152,8 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
 
             return _new_forward
 
-        attn.forward = _make_new_forward(attn, layer_idx, n_q, n_kv, d_model, d_head, n_rep)
+        new_fwd = _make_new_forward(attn, layer_idx, n_q, n_kv, d_model, d_head, n_rep)
+        attn.forward = types.MethodType(new_fwd, attn)
         wrapper = PatchedAttentionMixin()
         _registry[layer_idx] = wrapper
 
