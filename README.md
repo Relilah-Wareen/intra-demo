@@ -72,7 +72,7 @@ python app.py
 | Dataset | HotPotQA — 500 train / 200 test / 6,863 pool |
 | Training | AdamW, lr=5e-3, 5,000 steps, pool subset=2,000 |
 | Hardware | NVIDIA RTX 4090 (24GB) on cloud (AutoDL) |
-| Train time | ~50 min (270M) / ~56 min (1B) on RTX 4090 |
+| Train time | ~56 min on RTX 4090 |
 
 ## Results
 
@@ -176,7 +176,7 @@ python app.py                         # 启动 Gradio 界面
 | 数据集 | HotPotQA — 500 训练 / 200 测试 / 6,863 证据池 |
 | 训练参数 | AdamW, lr=5e-3, 5,000 步, 每步子集=2,000 |
 | 硬件 | NVIDIA RTX 4090 (24GB) 云端 (AutoDL) |
-| 训练耗时 | ~50 分钟 (270M) / ~56 分钟 (1B) |
+| 训练耗时 | ~56 分钟 |
 
 ## 实验结果
 
