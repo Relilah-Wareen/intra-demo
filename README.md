@@ -1,38 +1,53 @@
-# INTRA Reproduction
+# INTRA Reproduction / INTRA 复现
 
-An open-source reproduction of **"Retrieval from Within: An Intrinsic Capability of Attention-Based Models"** (NeurIPS 2026).
+> An open-source reproduction of **"Retrieval from Within: An Intrinsic Capability of Attention-Based Models"** (NeurIPS 2026)  
+> 开源复现 ——《从内部检索：注意力模型的内在能力》(NeurIPS 2026)
 
-> **Paper** by Elad Hoffer, Yochai Blau, Edan Kinderman, Ron Banner, Daniel Soudry, Boris Ginsburg (NVIDIA) — [arXiv:2605.05806](https://arxiv.org/abs/2605.05806)
+**Authors / 作者**: Elad Hoffer, Yochai Blau, Edan Kinderman, Ron Banner, Daniel Soudry, Boris Ginsburg (NVIDIA) — [arXiv:2605.05806](https://arxiv.org/abs/2605.05806)
 
-## What INTRA Does
+---
 
-Traditional RAG uses a **separate retriever** (TF-IDF, BM25, dense embeddings) to find documents, then feeds them to a generator. INTRA asks: *can the generator's own cross-attention mechanism do the retrieval?*
+## What INTRA Does / INTRA 做了什么
+
+*English:* Traditional RAG uses a separate retriever (TF-IDF, BM25, dense embeddings) to find documents, then feeds them to a generator. INTRA asks: *can the generator's own cross-attention mechanism do the retrieval?*
+
+*中文：* 传统 RAG 用独立检索器查找文档再喂给生成器。INTRA 探索了一个问题：**生成器自身的交叉注意力机制能否直接完成检索？**
 
 The key insight: encoder-decoder models already perform a query-conditioned matching operation in their cross-attention layers. INTRA repurposes this internal signal — the decoder's attention queries — to score and select evidence chunks **directly in the model's own representation space**.
 
-## What We Implemented
+核心思想：编码器-解码器模型的交叉注意力本身就在做"查询-匹配"操作。INTRA 借用解码器内部的注意力查询信号，直接在模型自身的表示空间中检索证据，无需外部检索器。
 
-### Core Components
+---
 
-- **Reverse-QWK (Reverse Query-Key Projection)**: Reparameterizes standard cross-attention so all decoder layers share a single normalized encoder pool (k̄), with layer-specific transformations pushed to the query side. Enables a single FAISS index to serve all layers.
+## What We Built / 我们实现了什么
 
-- **Monkey-patched attention forward**: Captures intermediate query states (q̃) after Q-projection, q-norm, and RoPE — matching exactly what the paper describes.
+### Core Components / 核心组件
 
-- **INTRA retrieval scoring**: MaxSim between decoder queries (q̃) and pooled chunk representations (k̂), with learned per-layer aggregation weights (α).
+- **Reverse-QWK**: Reparameterizes cross-attention so all decoder layers share a single normalized encoder pool (k̄), with layer-specific transformations pushed to the query side. Enables one FAISS index for all layers.  
+  将逐层的键投影重参数化到查询端，所有解码器层共享同一个归一化编码器池，单一 FAISS 索引服务所有层。
 
-- **Training pipeline**: Only 40K-74K trainable parameters (ρ retrieval tokens + α weights), encoder and decoder fully frozen.
+- **Monkey-patched attention forward**: Captures intermediate query states (q̃) after Q-projection, q-norm, and RoPE — matching the paper exactly.  
+  通过 monkey-patch 在注意力前向传播内部捕获 q̃，完整经过 Q 投影→q_norm→RoPE，与论文描述严格一致。
 
-### Baselines
+- **INTRA retrieval scoring**: MaxSim between decoder queries (q̃) and pooled chunk representations (k̂), with learned per-layer aggregation weights (α).  
+  在解码器查询与池化片段表示之间计算 MaxSim，使用可学习的逐层聚合权重。
+
+- **Training pipeline**: Only 40K-74K trainable parameters (ρ retrieval tokens + α weights), encoder and decoder fully frozen.  
+  仅训练 4-7 万参数，编码器和解码器完全冻结。
+
+### Baselines / 基线
 
 - TF-IDF retrieval + T5Gemma2 generation
 - BM25 retrieval + T5Gemma2 generation
 
-### Repository Structure
+---
+
+## Repository Structure / 项目结构
 
 ```
 intra-demo/
-├── intra/              # Core library
-│   ├── attention.py    # MaxSim scoring, Reverse-QWK functions
+├── intra/              # Core library / 核心库
+│   ├── attention.py    # MaxSim scoring, Reverse-QWK
 │   ├── config.py       # Central configuration
 │   ├── encoder.py      # Chunk encoding + FAISS index
 │   ├── generation.py   # INTRA answer generation
@@ -41,51 +56,46 @@ intra-demo/
 │   ├── retrieval.py    # INTRA retrieval params + scoring
 │   └── training.py     # Training loop
 ├── baselines/
-│   └── rag_baseline.py # TF-IDF/BM25 baselines
+│   └── rag_baseline.py # TF-IDF / BM25 baselines
 ├── scripts/
 │   ├── 01_download_data.py
 │   ├── 02_encode_pool.py
 │   ├── 03_train_retrieval.py
 │   └── 03_evaluate.py
 ├── app.py              # Gradio comparison UI
-├── test_vram.py        # VRAM memory test
 ├── run_all.py          # Master entry point
 └── requirements.txt
 ```
 
-## Quick Start
+---
+
+## Quick Start / 快速开始
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Login to HuggingFace (accept Gemma license first)
-hf auth login
-
-# 3. Download data
-python scripts/01_download_data.py
-
-# 4. Pre-encode chunk pool + build FAISS index
-python scripts/02_encode_pool.py
-
-# 5. Train retrieval parameters (~40K params, model frozen)
-python scripts/03_train_retrieval.py
-
-# 6. Evaluate
-python scripts/03_evaluate.py
-
-# 7. Launch Gradio UI
-python app.py
+pip install -r requirements.txt    # Install dependencies / 安装依赖
+hf auth login                       # Login to HuggingFace (accept Gemma license first)
+python scripts/01_download_data.py  # Download HotPotQA
+python scripts/02_encode_pool.py    # Encode chunks + build FAISS index
+python scripts/03_train_retrieval.py  # Train retrieval params (~40K params)
+python scripts/03_evaluate.py       # Evaluate vs TF-IDF/BM25
+python app.py                       # Launch Gradio UI
 ```
 
-## Experimental Setup
+---
 
-- **Model**: T5Gemma2-270M (local CPU) / T5Gemma2-1B (cloud GPU RTX 4090)
-- **Dataset**: HotPotQA dev set — 500 train / 200 test / 6,863 evidence pool
-- **Training**: AdamW, lr=5e-3, 5,000 steps, batch_size=2-4
-- **Hardware tested**: Laptop CPU (i7-11800H, 16GB), NVIDIA RTX 4090 (24GB)
+## Experimental Setup / 实验配置
 
-## Results
+| Item | Value |
+|------|-------|
+| Model | T5Gemma2-270M / T5Gemma2-1B |
+| Dataset | HotPotQA — 500 train / 200 test / 6,863 pool |
+| Training | AdamW, lr=5e-3, 5,000 steps, pool subset=2,000 |
+| Hardware | NVIDIA RTX 4090 (24GB) on cloud (AutoDL) |
+| Train time | ~50 min (270M) / ~56 min (1B) on RTX 4090 |
+
+---
+
+## Results / 实验结果
 
 | Method | R@5 | R@10 | R@20 |
 |--------|-----|------|------|
@@ -93,22 +103,39 @@ python app.py
 | BM25 | 41.4% | 64.8% | 76.1% |
 | INTRA (ours) | 0.6% | 0.6% | 0.6% |
 
-## Why INTRA Underperforms
+---
 
-Our reproduction achieves **correct implementation but limited results** due to one key limitation:
+## Why INTRA Underperforms / 为什么结果不理想
 
-**Missing CLaRa QA pretraining.** The paper initializes from a T5Gemma2 checkpoint fine-tuned on Apple's CLaRa QA pretraining dataset, which trains the decoder to use cross-attention for retrieving evidence. This checkpoint is not publicly available. Starting from a vanilla pretrained checkpoint, the decoder's cross-attention queries lack the ability to discriminate relevant from irrelevant chunks.
+*English:* Our implementation is **verified correct** — all sub-components (Reverse-QWK, MaxSim, RoPE-aware q̃ capture, training loop) work as described in the paper. The gap is due to a single missing dependency:
 
-The implementation itself is verified correct — all sub-components (Reverse-QWK, MaxSim, q̃ capture with RoPE, training loop) work as described in the paper. This is a *pretraining gap*, not a *code bug*.
+**CLaRa QA pretraining.** The paper initializes from a T5Gemma2 checkpoint fine-tuned on Apple's CLaRa QA pretraining dataset, which trains the decoder to use cross-attention specifically for evidence retrieval. This checkpoint is not publicly available (CLaRa's open-source models use Mistral-7B, not T5Gemma2). Without it, the decoder's cross-attention queries lack the ability to discriminate relevant from irrelevant chunks. This is a **pretraining gap**, not a code bug.
 
-## Technical Challenges Solved
+*中文：* 代码实现经验证正确——Reverse-QWK、MaxSim、含 RoPE 的 q̃ 捕获、训练流程均与论文一致。差距源于一个缺失的依赖：
 
-1. **RMSNorm application**: Hidden states must pass through `pre_self_attn_layernorm` before computing q̃
-2. **RoPE positional encoding**: q̃ computation must happen after Q-projection + q-norm + RoPE — inside the attention forward, not externally from hidden states
-3. **Dtype alignment**: model weights are bfloat16, retrieval params must match
-4. **GQA support**: T5Gemma2 uses Grouped-Query Attention (4 Q-heads, 1 KV-head), requiring KV replication in Reverse-QWK transformation
-5. **Merged attention**: T5Gemma2MergedAttention handles both self-attention and cross-attention, requiring careful monkey-patching
+**CLaRa QA 预训练。** 论文使用的 T5Gemma2 checkpoint 经过了 Apple CLaRa 的检索-生成联合预训练，解码器被专门训练过"用交叉注意力找证据"。该 checkpoint 未公开（CLaRa 开源模型基于 Mistral-7B，非 T5Gemma2）。缺失它，解码器的交叉注意力缺乏检索判别能力。这是**预训练缺失**，而非代码 bug。
 
-## License
+---
 
-MIT. This is an independent academic reproduction project.
+## Technical Challenges Solved / 解决的技术难点
+
+1. **RMSNorm**: Hidden states must pass through `pre_self_attn_layernorm` before computing q̃  
+   隐状态须先经 RMSNorm 归一化才能计算 q̃
+
+2. **RoPE**: q̃ computation must happen *inside* the attention forward (after Q-proj + q-norm + RoPE), not externally from hidden states  
+   q̃ 必须在注意力前向内部计算（Q 投影→q_norm→RoPE 之后），不能从外部隐状态推导
+
+3. **Dtype**: Model weights are bfloat16, retrieval params must be cast to match  
+   模型权重为 bfloat16，检索参数须对齐数据类型
+
+4. **GQA**: T5Gemma2 uses Grouped-Query Attention (4 Q-heads, 1 KV-head), requiring KV replication in the Reverse-QWK transform  
+   T5Gemma2 使用分组查询注意力，Reverse-QWK 变换中需要复制 KV
+
+5. **Merged attention**: `T5Gemma2MergedAttention` handles self+ cross-attention jointly, requiring `types.MethodType` for patching  
+   合并注意力模块需用 `types.MethodType` 绑定 monkey-patch
+
+---
+
+## License / 许可
+
+MIT. Independent academic reproduction project / 独立学术复现项目。
