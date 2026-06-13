@@ -125,7 +125,10 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
                 W_k_weight = self.k_proj.weight
                 W_k_r = W_k_weight.view(nkv, dh, dm).repeat_interleave(nrep, dim=0)
                 gamma_k = self.k_norm.weight
-                q_tilde = torch.einsum('bqhd,hdi->bhqi', query_states * gamma_k, W_k_r)
+                # query_states: [B, n_h, q_len, d_h] (after transpose + RoPE)
+                # W_k_r:       [n_h, d_h, d_model]
+                # q_tilde:     [B, n_h, q_len, d_model]
+                q_tilde = torch.einsum('bhqd,hdi->bhqi', query_states * gamma_k, W_k_r)
 
                 _registry[lidx]._last_q_tilde = q_tilde.detach()
 
