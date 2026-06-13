@@ -46,7 +46,7 @@ def load_intra_modules():
     params.eval()
 
     k_hat = torch.load(cfg.k_hat_path, map_location=cfg.device, weights_only=True)
-    k_bar_list = torch.load(cfg.k_bar_path, map_location="cpu", weights_only=True)
+    k_bar_list = torch.load(cfg.k_bar_path, map_location="cpu")
 
     from intra.encoder import ChunkEncoder
     encoder = ChunkEncoder()

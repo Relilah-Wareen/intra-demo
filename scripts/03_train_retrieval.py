@@ -50,8 +50,8 @@ def main():
         pool = json.load(f)
     chunk_id_to_idx = {item["chunk_id"]: i for i, item in enumerate(pool)}
 
-    k_hat = torch.load(cfg.k_hat_path, map_location="cpu", weights_only=True).to(device)
-    k_bar_list = torch.load(cfg.k_bar_path, map_location="cpu", weights_only=True)
+    k_hat = torch.load(cfg.k_hat_path, map_location="cpu", weights_only=True)
+    k_bar_list = torch.load(cfg.k_bar_path, map_location="cpu")
 
     index = faiss.read_index(str(cfg.faiss_index_path))
     index.nprobe = 10
@@ -69,6 +69,10 @@ def main():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     model.eval()
+
+    # Cast data to model dtype
+    _model_dtype = next(model.parameters()).dtype
+    k_hat = k_hat.to(device=device, dtype=_model_dtype)
 
     # ---- Patch for Reverse-QWK ----
     meta = patch_decoder_for_intra(model, tokenizer)
@@ -89,10 +93,11 @@ def main():
     existing = load_params()
     if existing is not None:
         params = existing.to(device)
+        params = params.to(dtype=_model_dtype)
         print("Loaded existing checkpoint.")
     else:
-        params = RetrievalParams(meta["d_model"], meta["n_layers"], meta["n_heads"])
-        params.to(device)
+        params = RetrievalParams(meta["d_model"], meta["n_layers"], meta["n_q_heads"])
+        params = params.to(device=device, dtype=_model_dtype)
         print("Initialized new retrieval params.")
 
     # Print param counts
@@ -102,15 +107,17 @@ def main():
     # ---- Optimizer ----
     import torch.optim as optim
     optimizer = optim.AdamW(params.parameters(), lr=cfg.lr)
+    warmup_steps = min(cfg.warmup_steps, cfg.train_steps - 1)
+    total_decay = max(cfg.train_steps - warmup_steps, 1)
     warmup = optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.01, end_factor=1.0, total_iters=cfg.warmup_steps,
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps,
     )
     decay = optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1.0, end_factor=0.01,
-        total_iters=cfg.train_steps - cfg.warmup_steps,
+        total_iters=total_decay,
     )
     scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup, decay], milestones=[cfg.warmup_steps],
+        optimizer, schedulers=[warmup, decay], milestones=[warmup_steps],
     )
 
     # ---- Encoder for initial retrieval ----
@@ -145,7 +152,7 @@ def main():
             k_x = encoder.encode_question(q).to(device)
             L_q = k_x.shape[0]
             if L_q <= L_p:
-                k_x_hat = torch.zeros(L_p, d_model, device=device)
+                k_x_hat = torch.zeros(L_p, d_model, device=device, dtype=k_x.dtype)
                 k_x_hat[:L_q] = k_x
             else:
                 idxs = torch.linspace(0, L_q, L_p + 1, dtype=torch.long)
@@ -173,6 +180,7 @@ def main():
                     inputs_embeds=x_retrieval,
                     encoder_hidden_states=ks0,
                     use_cache=False,
+                    output_hidden_states=True,  # needed to extract q̃_l
                 )
             except (TypeError, NotImplementedError):
                 # Fallback: use input_ids, append dummy retrieval token ids
@@ -182,14 +190,24 @@ def main():
                     input_ids=combined_ids,
                     encoder_hidden_states=ks0,
                     use_cache=False,
+                    output_hidden_states=True,
                 )
 
-            # ---- Get q̃_l ----
-            q_tildes = get_query_states_for_retrieval(
-                retrieval_token_positions=slice(-R, None)
-            )
-            if len(q_tildes) == 0:
-                q_tildes = get_query_states_for_retrieval()  # fallback: all positions
+            # ---- Extract q̃_l from decoder hidden states ----
+            # decoder_out.hidden_states has one tensor per layer (the OUTPUT of each layer)
+            # We need the INPUT to each layer's attention module, which is the
+            # post-layernorm hidden state from the previous layer.
+            # T5Gemma2 decoder's hidden_states[0] = embedding output
+            # hidden_states[1] = layer 0 output, ... hidden_states[L] = layer L-1 output
+            hs = list(decoder_out.hidden_states)  # [L+1] tensors, hs[0] = embeddings, hs[i] = layer i output
+            from intra.model_patch import capture_q_tilde_from_hidden_states
+            # We pass the input to each layer, which is the hidden state BEFORE the layer.
+            # For T5Gemma2, the layer input is roughly hs[i] (previous layer's output).
+            layer_inputs = hs[:-1]  # [L] tensors, input to each layer
+            q_tildes = capture_q_tilde_from_hidden_states(layer_inputs)
+
+            # Keep only retrieval token positions, strip batch dim
+            q_tildes = [qt[0, :, -R:, :] for qt in q_tildes]  # each [n_q, R, d_model]
 
             # ---- INTRA scores + loss ----
             scores = intra_scores(q_tildes, k_hat, params.alpha)

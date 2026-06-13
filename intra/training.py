@@ -142,7 +142,7 @@ def train_retrieval(
 
                 # ---- Build K(S₀) for cross-attention ----
                 # Load k̄ for initial chunks
-                k_bar_list = torch.load(cfg.k_bar_path, map_location=device, weights_only=True)
+                k_bar_list = torch.load(cfg.k_bar_path, map_location=device)
                 ks0 = torch.cat([k_bar_list[i] for i in s0_list], dim=0).unsqueeze(0)  # [1, ...]
 
                 # ---- Decoder forward (retrieval pass) ----

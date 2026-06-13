@@ -29,9 +29,9 @@ TOKENIZER = None
 INTRA_ENABLED = False
 
 print("Loading model ...")
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-MODEL = AutoModel.from_pretrained(cfg.model_name)
+MODEL = AutoModelForSeq2SeqLM.from_pretrained(cfg.model_name)
 MODEL = MODEL.to(cfg.device)
 TOKENIZER = AutoTokenizer.from_pretrained(cfg.model_name)
 if TOKENIZER.pad_token_id is None:

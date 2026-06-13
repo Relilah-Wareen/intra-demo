@@ -55,22 +55,24 @@ class ChunkEncoder:
 
         print(f"Loading encoder from {cfg.model_name} ...")
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
-        kw = {}
+        kw = {"device_map": cfg.device}
         if cfg.use_8bit:
             kw["load_in_8bit"] = True
         elif cfg.use_4bit:
             from transformers import BitsAndBytesConfig
             kw["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
-        else:
-            kw["dtype"] = torch.float16
-
-        kw["device_map"] = cfg.device
         self.model = AutoModel.from_pretrained(cfg.model_name, **kw)
         self.model.eval()
         self.encoder = self.model.encoder
-        self.rms_norm = nn.RMSNorm(self.model.config.d_model, eps=1e-6)
+        # T5Gemma2 has nested config: config.decoder.hidden_size
+        if hasattr(self.model.config, "decoder"):
+            self.dim = self.model.config.decoder.hidden_size
+            eps = self.model.config.decoder.rms_norm_eps
+        else:
+            self.dim = self.model.config.d_model
+            eps = 1e-6
+        self.rms_norm = nn.RMSNorm(self.dim, eps=eps)
         self.rms_norm.to(cfg.device)
-        self.dim = self.model.config.d_model
         print(f"  hidden dim = {self.dim}")
         # Free encoder from the full model to save memory if needed
         del self.model
