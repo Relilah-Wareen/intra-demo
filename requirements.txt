@@ -1,6 +1,7 @@
 torch>=2.0
 transformers>=4.45
 datasets>=2.14
+accelerate
 faiss-cpu
 scikit-learn
 rank-bm25

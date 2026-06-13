@@ -151,8 +151,9 @@ def maxsim_score_all_chunks(
             k_chunk = k_hat_all[start:end]  # [C, L_p, d]
 
             dots = torch.einsum('hrd,cid->hrci', q_tilde, k_chunk) / math.sqrt(d)
-            # Max over chunk tokens (L_p), sum over query tokens (R)
-            maxsim = dots.max(dim=-2).values.sum(dim=-2)  # [n_heads, C]
+            # dots: [n_heads, R, C, L_p]
+            # Max over chunk tokens (L_p=dim=-1), sum over retrieval tokens (R=dim=1)
+            maxsim = dots.max(dim=-1).values.sum(dim=1)  # [n_heads, C]
             # Weight by alpha
             scores[start:end] += (alpha[l].unsqueeze(-1) * maxsim).sum(dim=0)
 

@@ -105,7 +105,10 @@ class ReverseQWKWrapper(nn.Module):
 
 
 def patch_decoder_for_intra(model, tokenizer=None) -> dict:
-    """Register hooks to capture q̃_l after each decoder layer's attention.
+    """Register wrappers for each decoder layer's attention module.
+
+    No hooks — q̃ is computed manually via capture_from_hidden_states() after
+    running the decoder with output_hidden_states=True.
 
     Returns metadata dict with model dimensions.
     """
