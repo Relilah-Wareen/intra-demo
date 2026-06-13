@@ -1,9 +1,25 @@
+# 个人隐私
 CV.pdf
+
+# 论文相关（非项目代码）
 arxiv-source/
 translation/
 arXiv-*.tar.gz
-*.log
+2605.05806v2.pdf
+
+# 数据与编译产物
 data/
+*.log
+texput.log
+neurips_2026_cn.*
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+*.egg-info/
+
+# 系统
+.DS_Store
+.claude/

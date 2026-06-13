@@ -17,7 +17,7 @@ def _detect_device() -> str:
 @dataclass
 class Config:
     # --- Model ---
-    model_name: str = "google/t5gemma-2-1b-1b"
+    model_name: str = "google/t5gemma-2-270m-270m"
     device: str = field(default_factory=_detect_device)
     use_8bit: bool = False
     use_4bit: bool = False
@@ -44,7 +44,7 @@ class Config:
     lr: float = 5e-3
     warmup_steps: int = 200
     train_steps: int = 5000           # fewer steps for larger 1B model
-    train_batch_size: int = 4         # smaller batch for 1B model
+    train_batch_size: int = 2         # CPU constraint
     pool_subset: int = 2000           # larger subset for better signal
 
     # --- Paths ---
