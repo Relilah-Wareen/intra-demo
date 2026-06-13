@@ -133,8 +133,8 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
                 _registry[lidx]._last_q_tilde = q_tilde.detach()
 
                 # ---- Step 3: Call original forward ----
+                # _orig is already a bound method, no need to pass self
                 return _orig(
-                    self,
                     hidden_states=hidden_states,
                     position_embeddings=position_embeddings,
                     merged_attention_mask=merged_attention_mask,
