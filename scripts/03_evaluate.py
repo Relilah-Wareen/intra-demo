@@ -21,7 +21,7 @@ def load_intra_modules():
     model.eval()
     _dt = next(model.parameters()).dtype
 
-    from intra.model_patch import patch_decoder_for_intra, get_query_states_for_retrieval, clear_query_cache, capture_q_tilde_from_hidden_states
+    from intra.model_patch import patch_decoder_for_intra, get_query_states_for_retrieval, clear_query_cache
     meta = patch_decoder_for_intra(model, tokenizer)
 
     from intra.retrieval import load_params
@@ -45,7 +45,6 @@ def load_intra_modules():
         "encoder": encoder, "index": index, "dtype": _dt,
         "get_q": get_query_states_for_retrieval,
         "clear_cache": clear_query_cache,
-        "capture_q": capture_q_tilde_from_hidden_states,
         "intra_scores": maxsim_score_all_chunks,
     }
 
@@ -55,7 +54,7 @@ def intra_retrieve_2stage(q: str, intra: dict) -> list[int]:
     p = intra["params"]; m = intra["model"]; tok = intra["tokenizer"]
     enc = intra["encoder"]; k_hat = intra["k_hat"]; k_bar = intra["k_bar"]
     idx = intra["index"]; _dt = intra["dtype"]
-    clear_cache = intra["clear_cache"]; capture_q = intra["capture_q"]
+    clear_cache = intra["clear_cache"]; get_q = intra["get_q"]
     intra_scores_fn = intra["intra_scores"]
     d_model = intra["meta"]["d_model"]
 
@@ -83,15 +82,15 @@ def intra_retrieve_2stage(q: str, intra: dict) -> list[int]:
     # Decoder forward
     clear_cache()
     try:
-        dec = m.decoder(inputs_embeds=xr, encoder_hidden_states=ks0, use_cache=False, output_hidden_states=True)
+        m.decoder(inputs_embeds=xr, encoder_hidden_states=ks0, use_cache=False)
     except (TypeError, NotImplementedError):
         rids = torch.full((1, R), tok.pad_token_id or 0, device=device)
         cids = torch.cat([tokens["input_ids"].to(device), rids], dim=1)
-        dec = m.decoder(input_ids=cids, encoder_hidden_states=ks0, use_cache=False, output_hidden_states=True)
+        m.decoder(input_ids=cids, encoder_hidden_states=ks0, use_cache=False)
 
-    hs = list(dec.hidden_states)
-    q_tildes = capture_q(hs[:-1])
-    q_tildes = [qt[0, :, -R:, :] for qt in q_tildes]
+    q_tildes = get_q(slice(-R, None))
+    if len(q_tildes) == 0:
+        q_tildes = get_q()
 
     # Stage 2: INTRA score on stage1 candidates only
     stage1_tensor = torch.tensor(stage1, device=device)

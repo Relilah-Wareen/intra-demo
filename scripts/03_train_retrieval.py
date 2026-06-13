@@ -13,7 +13,7 @@ from intra.config import cfg
 from intra.encoder import ChunkEncoder
 from intra.model_patch import (
     patch_decoder_for_intra, get_query_states_for_retrieval,
-    clear_query_cache, capture_q_tilde_from_hidden_states,
+    clear_query_cache,
 )
 from intra.retrieval import RetrievalParams, intra_scores, save_params, load_params
 
@@ -134,16 +134,16 @@ def main():
             # Decoder forward
             clear_query_cache()
             try:
-                dec_out = model.decoder(inputs_embeds=xr, encoder_hidden_states=ks0, use_cache=False, output_hidden_states=True)
+                model.decoder(inputs_embeds=xr, encoder_hidden_states=ks0, use_cache=False)
             except (TypeError, NotImplementedError):
                 rids = torch.full((1, R), tokenizer.pad_token_id or 0, device=device)
                 cids = torch.cat([input_ids, rids], dim=1)
-                dec_out = model.decoder(input_ids=cids, encoder_hidden_states=ks0, use_cache=False, output_hidden_states=True)
+                model.decoder(input_ids=cids, encoder_hidden_states=ks0, use_cache=False)
 
-            # Extract q_tilde
-            hs = list(dec_out.hidden_states)
-            q_tildes = capture_q_tilde_from_hidden_states(hs[:-1])
-            q_tildes = [qt[0, :, -R:, :] for qt in q_tildes]
+            # Extract q_tilde (auto-captured during attention forward)
+            q_tildes = get_query_states_for_retrieval(slice(-R, None))
+            if len(q_tildes) == 0:
+                q_tildes = get_query_states_for_retrieval()  # fallback
 
             # Score + loss
             scores = intra_scores(q_tildes, k_hat_sub, params.alpha)

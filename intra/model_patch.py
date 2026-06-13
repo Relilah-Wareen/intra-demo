@@ -1,33 +1,28 @@
 """Monkey-patch T5Gemma2 for Reverse-QWK cross-attention.
 
-Based on actual model structure discovered by 02_inspect_model.py:
+Captures q̃_l INSIDE attention forward (after q_norm + RoPE, before scoring)
+to guarantee correctness of the Reverse-QWK computation.
 
-T5Gemma2-270M-270M decoder:
-  - 18 layers, T5Gemma2MergedAttention (layer.self_attn)
+Based on actual T5Gemma2-270M-270M and T5Gemma2-1B-1B structures:
+  - T5Gemma2MergedAttention (layer.self_attn)
   - GQA: 4 Q-heads, 1 KV-head (n_rep=4)
-  - d_model=640, d_head=256
-  - W_K: k_proj.weight (256, 640), gamma: k_norm.weight (256,)
-  - W_V: v_proj.weight (256, 640)
-
-The Reverse-QWK approach moves layer-specific K-projection to the query side,
-allowing all layers to share a single RMSNorm-ed encoder pool k̄.
+  - W_K: k_proj.weight, gamma: k_norm.weight
 """
 
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-_registry: dict[int, "ReverseQWKWrapper"] = {}
+_registry: dict[int, "PatchedAttentionMixin"] = {}
 
 
 def _get_decoder_config(model) -> dict:
-    """Extract decoder config, handling T5Gemma2 nested config structure."""
     cfg = model.config
-    # T5Gemma2Config has encoder/decoder sub-configs
     if hasattr(cfg, "decoder"):
         dc = cfg.decoder
     else:
@@ -39,76 +34,47 @@ def _get_decoder_config(model) -> dict:
         "n_kv_heads": dc.num_key_value_heads,
         "d_head": dc.head_dim,
         "n_rep": dc.num_attention_heads // dc.num_key_value_heads,
-        "eps": dc.rms_norm_eps,
     }
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """Repeat KV heads for GQA. x: [B, kv_len, n_kv, d_h] → [B, n_q, kv_len, d_h]"""
-    if n_rep == 1:
-        return x.transpose(1, 2)
-    b, kv_len, n_kv, d_h = x.shape
-    x = x[:, :, :, None, :].expand(b, kv_len, n_kv, n_rep, d_h)
-    return x.reshape(b, kv_len, n_kv * n_rep, d_h).transpose(1, 2)
+def _build_patched_forward(orig_forward, layer_idx: int):
+    """Create a patched forward that captures q̃ after RoPE."""
 
+    def patched_forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor = None,
+        attention_mask: torch.Tensor = None,
+        encoder_hidden_states: torch.Tensor = None,
+        encoder_attention_mask: torch.Tensor = None,
+        past_key_value: torch.Tensor = None,
+        cache_position: torch.Tensor = None,
+        **kwargs,
+    ):
+        # Call original forward to get all outputs
+        outputs = orig_forward(
+            self,
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_value=past_key_value,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        return outputs
 
-class ReverseQWKWrapper(nn.Module):
-    """Wraps a T5Gemma2MergedAttention to expose q̃ for retrieval scoring.
-
-    The wrapper stores a reference to the attention module's parameters
-    and provides a method to compute q̃_l from decoder hidden states.
-
-    IMPORTANT: We do NOT replace the forward() of the attention module.
-    Instead, we capture the intermediate q̃ after each forward pass by
-    hooking into the module and computing it from the Q and W_K params.
-    """
-
-    def __init__(self, attn_module: nn.Module, layer_idx: int, rms_norm: nn.Module | None = None):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self._attn = attn_module
-        self._rms_norm = rms_norm  # pre_self_attn_layernorm (RMSNorm)
-        self.W_k = attn_module.k_proj.weight
-        self.gamma_k = attn_module.k_norm.weight
-        self._last_q_tilde: torch.Tensor | None = None
-
-    def compute_q_tilde(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Compute q̃ from decoder hidden states (before attention forward).
-
-        Applies pre_self_attn_layernorm to hidden_states first (matching what
-        the real self_attn receives), then computes q̃ = (q ⊙ γ_K) · W_K^T.
-        """
-        attn = self._attn
-        # Apply RMSNorm — this is what the real self_attn sees
-        if self._rms_norm is not None:
-            hidden_states = self._rms_norm(hidden_states)
-
-        d_model = hidden_states.shape[-1]
-        n_kv = attn.k_proj.weight.shape[0] // attn.k_norm.weight.shape[0]
-        d_h = attn.k_norm.weight.shape[0]
-        n_q = attn.q_proj.weight.shape[0] // d_h
-        n_rep = n_q // n_kv
-
-        Q = attn.q_proj(hidden_states)
-        Q = Q.view(-1, hidden_states.shape[1], n_q, d_h)    # [B, q_len, n_q, d_h]
-
-        # Reverse key projection
-        W_k_r = self.W_k.view(n_kv, d_h, d_model)           # [n_kv, d_h, d_model]
-        W_k_r = W_k_r.repeat_interleave(n_rep, dim=0)       # [n_q, d_h, d_model]
-        q_tilde = torch.einsum('bqhd,hdi->bhqi', Q * self.gamma_k, W_k_r)
-        # [B, n_q, q_len, d_model]
-
-        self._last_q_tilde = q_tilde.detach()
-        return q_tilde
+    return patched_forward
 
 
 def patch_decoder_for_intra(model, tokenizer=None) -> dict:
-    """Register wrappers for each decoder layer's attention module.
+    """Install a forward PRE-hook on each decoder layer's RMSNorm to capture
+    normalized hidden states before they enter self_attn, then compute q̃
+    using the attention module's own Q projection + RoPE machinery.
 
-    No hooks — q̃ is computed manually via capture_from_hidden_states() after
-    running the decoder with output_hidden_states=True.
-
-    Returns metadata dict with model dimensions.
+    We can't just call attn.q_proj() because RoPE is applied inside attn.forward.
+    Instead, we inject a tiny wrapper that intercepts the call to self_attn.
     """
     meta = _get_decoder_config(model)
 
@@ -119,49 +85,107 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
     _registry.clear()
 
     for layer_idx, decoder_layer in enumerate(model.decoder.layers):
-        attn_module = decoder_layer.self_attn
-        rms_norm = getattr(decoder_layer, "pre_self_attn_layernorm", None)
-        wrapper = ReverseQWKWrapper(attn_module, layer_idx, rms_norm)
+        attn = decoder_layer.self_attn
+        # Store original forward
+        attn._orig_forward = attn.forward
+
+        n_q = meta["n_q_heads"]
+        n_kv = meta["n_kv_heads"]
+        d_model = meta["d_model"]
+        d_head = meta["d_head"]
+        n_rep = meta["n_rep"]
+
+        # Create a new forward that captures q̃
+        def _make_new_forward(a, lidx, nq, nkv, dm, dh, nrep):
+            _orig = a._orig_forward
+
+            def _new_forward(
+                self,
+                hidden_states,
+                position_ids=None,
+                attention_mask=None,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                past_key_value=None,
+                cache_position=None,
+                **kwargs,
+            ):
+                # ---- Step 1: Q projection + q_norm + RoPE (matching original) ----
+                bsz, q_len, _ = hidden_states.size()
+                hidden_shape = (bsz, q_len, nq, dh)
+
+                # Q projection
+                query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                # q_norm (RMSNorm on Q)
+                query_states = self.q_norm(query_states)
+
+                # RoPE — need position_ids
+                if position_ids is None:
+                    position_ids = torch.arange(q_len, device=hidden_states.device).unsqueeze(0)
+
+                cos, sin = self.rotary_emb(query_states, position_ids)
+                query_states, _ = _apply_rotary_pos_emb_single(query_states, cos, sin)
+
+                # ---- Step 2: Compute q̃ (Reverse-QWK) ----
+                # q̃ = (q ⊙ γ_K) · W_K^T
+                W_k_weight = self.k_proj.weight  # [n_kv*d_h, d_model]
+                W_k_r = W_k_weight.view(nkv, dh, dm).repeat_interleave(nrep, dim=0)  # [n_q, d_h, d_model]
+                gamma_k = self.k_norm.weight  # [d_h]
+                q_tilde = torch.einsum('bqhd,hdi->bhqi', query_states * gamma_k, W_k_r)
+                # q_tilde: [B, n_q, q_len, d_model]
+
+                _registry[lidx]._last_q_tilde = q_tilde.detach()
+
+                # ---- Step 3: Call original forward ----
+                return _orig(
+                    self,
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    past_key_value=past_key_value,
+                    cache_position=cache_position,
+                    **kwargs,
+                )
+
+            return _new_forward
+
+        attn.forward = _make_new_forward(attn, layer_idx, n_q, n_kv, d_model, d_head, n_rep)
+        wrapper = PatchedAttentionMixin()
         _registry[layer_idx] = wrapper
 
-    print(f"  Registered {len(_registry)} layers for q̃ capture")
+    print(f"  Patched {len(_registry)} layers to capture q̃ (with RoPE + q_norm)")
     return meta
 
 
-def capture_q_tilde_from_hidden_states(
-    hidden_states_per_layer: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """After running the decoder, compute q̃ for each layer.
+class PatchedAttentionMixin:
+    """Simple container for cached q̃."""
+    def __init__(self):
+        self._last_q_tilde: torch.Tensor | None = None
 
-    Call this with the hidden states from EACH decoder layer.
-    Returns list of [n_q, q_len, d_model].
 
-    Note: In practice, you'd use register_forward_hook to capture the
-    input to each decoder layer's attention module. For simplicity,
-    we provide this explicit API.
-    """
-    q_tildes = []
-    for layer_idx, wrapper in sorted(_registry.items()):
-        if layer_idx < len(hidden_states_per_layer):
-            hs = hidden_states_per_layer[layer_idx]
-            qt = wrapper.compute_q_tilde(hs)
-            q_tildes.append(qt)
-    return q_tildes
+def _apply_rotary_pos_emb_single(q, cos, sin):
+    """Apply RoPE to query only (not key)."""
+    q_embed = (q * cos) + (_rotate_half(q) * sin)
+    return q_embed, None
+
+
+def _rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
 
 
 def get_query_states_for_retrieval(
     retrieval_token_positions: slice | None = None,
 ) -> list[torch.Tensor]:
-    """Return cached q̃_l from the most recent forward pass.
-
-    Returns list of [n_q, R, d_model] where R is retrieval token count.
-    """
+    """Return cached q̃_l from the most recent decoder forward pass."""
     q_states = []
     for layer_idx in sorted(_registry.keys()):
         wrapper = _registry[layer_idx]
         qt = wrapper._last_q_tilde
         if qt is not None:
-            qt = qt[0]  # take batch 0: [n_q, q_len, d_model]
+            qt = qt[0]  # [n_q, q_len, d_model]
             if retrieval_token_positions is not None:
                 qt = qt[:, retrieval_token_positions, :]
             q_states.append(qt)
@@ -169,6 +193,5 @@ def get_query_states_for_retrieval(
 
 
 def clear_query_cache():
-    """Reset stored q̃_l after each forward pass."""
     for wrapper in _registry.values():
         wrapper._last_q_tilde = None
