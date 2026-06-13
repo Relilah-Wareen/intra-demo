@@ -63,35 +63,33 @@ class ReverseQWKWrapper(nn.Module):
     hooking into the module and computing it from the Q and W_K params.
     """
 
-    def __init__(self, attn_module: nn.Module, layer_idx: int):
+    def __init__(self, attn_module: nn.Module, layer_idx: int, rms_norm: nn.Module | None = None):
         super().__init__()
         self.layer_idx = layer_idx
         self._attn = attn_module
-        # Reference to params (not cloned — we use the originals)
-        self.W_k = attn_module.k_proj.weight       # [n_kv*d_h, d_model]
-        self.gamma_k = attn_module.k_norm.weight    # [d_h]
+        self._rms_norm = rms_norm  # pre_self_attn_layernorm (RMSNorm)
+        self.W_k = attn_module.k_proj.weight
+        self.gamma_k = attn_module.k_norm.weight
         self._last_q_tilde: torch.Tensor | None = None
 
     def compute_q_tilde(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Compute q̃ from decoder hidden states (before attention forward).
 
-        This is called AFTER the Q projection but BEFORE attention scores.
-        q̃ = (q ⊙ γ_K) · W_K^T
-
-        Args:
-            hidden_states: [B, q_len, d_model] — raw decoder inputs to this layer
-        Returns:
-            q_tilde: [B, n_q_heads, q_len, d_model]
+        Applies pre_self_attn_layernorm to hidden_states first (matching what
+        the real self_attn receives), then computes q̃ = (q ⊙ γ_K) · W_K^T.
         """
         attn = self._attn
+        # Apply RMSNorm — this is what the real self_attn sees
+        if self._rms_norm is not None:
+            hidden_states = self._rms_norm(hidden_states)
+
         d_model = hidden_states.shape[-1]
         n_kv = attn.k_proj.weight.shape[0] // attn.k_norm.weight.shape[0]
         d_h = attn.k_norm.weight.shape[0]
         n_q = attn.q_proj.weight.shape[0] // d_h
         n_rep = n_q // n_kv
 
-        # Standard Q projection
-        Q = attn.q_proj(hidden_states)                      # [B, q_len, n_q*d_h]
+        Q = attn.q_proj(hidden_states)
         Q = Q.view(-1, hidden_states.shape[1], n_q, d_h)    # [B, q_len, n_q, d_h]
 
         # Reverse key projection
@@ -122,7 +120,8 @@ def patch_decoder_for_intra(model, tokenizer=None) -> dict:
 
     for layer_idx, decoder_layer in enumerate(model.decoder.layers):
         attn_module = decoder_layer.self_attn
-        wrapper = ReverseQWKWrapper(attn_module, layer_idx)
+        rms_norm = getattr(decoder_layer, "pre_self_attn_layernorm", None)
+        wrapper = ReverseQWKWrapper(attn_module, layer_idx, rms_norm)
         _registry[layer_idx] = wrapper
 
     print(f"  Registered {len(_registry)} layers for q̃ capture")
